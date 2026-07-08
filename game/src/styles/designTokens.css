@@ -1,0 +1,46 @@
+/* Design Tokens – derived from design-system.md */
+:root {
+  /* Primary palette (cold blues) */
+  --color-base-dark: #001050; /* deepest night */
+  --color-base-mid: #002070;
+  --color-base-light: #0030A0;
+  --color-accent-cyan: #48D0F8; /* aurora cyan */
+  --color-accent-white: #A8F8F8;
+  --color-crystal-primary: #0030D8; /* sapphire */
+  --color-crystal-light: #0078D8;
+  --color-crystal-highlight: #F8F8F8;
+  --color-rock-dark: #000010;
+  --color-rock-mid: #001030;
+  --color-moss: #103050;
+  --color-accent-warm-1: #FF8FA0; /* pink coral */
+  --color-accent-warm-2: #F8D0D8; /* soft pink */
+  --color-accent-warm-3: #FFD87A; /* gold coral */
+  --color-accent-warm-4: #5EE8C5; /* mint */
+
+  /* Typography */
+  --font-base: 'Outfit', sans-serif;
+  --font-size-base: 1rem;
+  --font-size-title: 2.5rem;
+  --font-weight-bold: 700;
+
+  /* Spacing & radii */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Shadows / glow */
+  --shadow-glow: 0 0 10px var(--color-accent-cyan);
+}
+
+/* Global body styling */
+body {
+  margin: 0;
+  font-family: var(--font-base);
+  background-color: var(--color-base-dark);
+  color: #fff;
+  overflow: hidden;
+}

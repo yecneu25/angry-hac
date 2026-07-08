@@ -1,0 +1,24 @@
+# Node dependencies
+game/node_modules/
+game/dist/
+
+# Local configuration & IDEs
+.vscode/
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Cloned Phaser repo
+phaser/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
