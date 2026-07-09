@@ -165,7 +165,10 @@ if (isTouchDevice) {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     const game = new Phaser.Game(buildConfig(true));
     setupOrientationResize(game);
+    // DEV-ONLY: exposed so headless diagnostics can inspect sound/scale state.
+    if (import.meta.env.DEV) (window as any).__PHASER_GAME__ = game;
   }));
 } else {
-  new Phaser.Game(buildConfig(false));
+  const game = new Phaser.Game(buildConfig(false));
+  if (import.meta.env.DEV) (window as any).__PHASER_GAME__ = game;
 }
