@@ -18,6 +18,17 @@ html, body {
   font-family: 'Outfit', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Prevent browser from auto-scaling text on orientation change */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* On mobile browsers the address bar / bottom UI shrinks the viewport.
+   Using dvh (dynamic viewport height) keeps the canvas truly full-screen. */
+@supports (height: 100dvh) {
+  html, body {
+    height: 100dvh;
+  }
 }
 
 /* The Phaser canvas parent */

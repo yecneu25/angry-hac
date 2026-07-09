@@ -1,6 +1,10 @@
 import Phaser from 'phaser';
 import { attachSkyMotion } from '../fx/skyMotion';
 import { paintBlock } from '../fx/blockPainter';
+import { makeCrystalButton, drawSpeakerIcon } from '../fx/crystalFrame';
+import { getLayout } from '../utils/responsive';
+import { ensureBgMusic, armMusicWatchdog, toggleMute, isMuted } from '../utils/music';
+import { isLowPowerDevice } from '../utils/perf';
 
 // Palette — design-system.md "Cực Quang & Hạc Pha Lê". Block materials live
 // in blockPainter.ts (shared with GameScene) so the menu fortress renders
@@ -16,8 +20,10 @@ const COL = {
 };
 
 export class MainMenuScene extends Phaser.Scene {
-  private soundEnabled = true;
   private soundButtonText!: Phaser.GameObjects.Text;
+  private soundIcon!: Phaser.GameObjects.Graphics;
+  private soundIconContainer!: Phaser.GameObjects.Container;
+  private soundIconRadius = 9;
   private resizeTimer: Phaser.Time.TimerEvent | null = null;
 
   constructor() {
@@ -25,8 +31,6 @@ export class MainMenuScene extends Phaser.Scene {
   }
 
   init() {
-    this.soundEnabled = localStorage.getItem('sound_enabled') !== 'false';
-    this.sound.mute = !this.soundEnabled;
     this.resizeTimer = null;
   }
 
@@ -35,7 +39,9 @@ export class MainMenuScene extends Phaser.Scene {
     const height = this.cameras.main.height;
 
     // ── Background (cover-fit) + vignette for text legibility ─────────────
-    const bg = this.add.image(width / 2, height / 2, 'cover_main');
+    // cover_main used to be a separately-loaded duplicate of bg_cover2
+    // (byte-identical file) — reusing the key here drops a redundant load.
+    const bg = this.add.image(width / 2, height / 2, 'bg_cover2');
     bg.setScale(Math.max(width / bg.width, height / bg.height));
 
     // ── Aurora drift + occasional lightning flash over the static sky art ──
@@ -55,14 +61,26 @@ export class MainMenuScene extends Phaser.Scene {
     //    its rock outcrop; dotted trajectory arcs between them; the two
     //    action buttons sit flush along the bottom edge. On narrow windows
     //    the scenic vignettes are dropped and only title + buttons remain. ──
-    const compact = width < 950;
+    const layout  = getLayout(width, height);
+    // compact: hide scenic vignettes on narrow OR short-landscape screens.
+    // On desktop (height ≥ 500) we keep the existing width<950 check unchanged.
+    const compact = layout.mobile ? true : width < 950;
 
     // ── Title stack (kicker → crystal lettering → light streak → tagline) ──
     const titleX = width / 2;
 
+    // On mobile landscape the stack is compressed vertically so everything
+    // fits above the buttons without overlap. Desktop layout is unchanged.
+    const titleStartY  = layout.mobile ? height * 0.06  : height * 0.10;
+    const titleGapMul  = layout.mobile ? 0.55 : 1.0;   // shrink inter-element gaps
+
+    // Now one line, so it can be sized to a good fraction of the ANGRY HẠC
+    // width below — a touch larger than before so it isn't dwarfed by the
+    // title (user: "để chữ hành trình kinh doanh to lên 1 chút").
     const journey = this.add.image(titleX, 0, 'txt_journey');
-    journey.setScale(Math.min(210, width * 0.17) / journey.width);
-    journey.y = height * 0.10 + journey.displayHeight / 2;
+    const journeyMaxW = layout.mobile ? Math.min(500, width * 0.42) : Math.min(650, width * 0.46);
+    journey.setScale(journeyMaxW / journey.width);
+    journey.y = titleStartY + journey.displayHeight / 2;
     journey.setAlpha(0.95);
 
     // "ANGRY HẠC" — real crystal lettering cropped from TITLE ĐẦU GAME.png.
@@ -71,32 +89,38 @@ export class MainMenuScene extends Phaser.Scene {
     // the letters glow exactly like the source art.
     const title  = this.add.image(titleX, 0, 'txt_title')
       .setBlendMode(Phaser.BlendModes.ADD);
-    const titleW = Math.min(width * 0.44, 680);
+    const titleW = layout.mobile
+      ? Math.min(width * 0.40, 520)
+      : Math.min(width * 0.44, 680);
     title.setScale(titleW / title.width);
-    title.y = journey.y + journey.displayHeight / 2 + title.displayHeight / 2 + 14;
+    title.y = journey.y + journey.displayHeight / 2 + title.displayHeight / 2 + 14 * titleGapMul;
     this.tweens.add({
       targets: title, alpha: { from: 1, to: 0.86 },
       duration: 2200, ease: 'Sine.easeInOut', yoyo: true, repeat: -1,
     });
 
-    const streak = this.add.image(titleX, title.y + title.displayHeight * 0.6 + 8, 'fx_light_h')
-      .setBlendMode(Phaser.BlendModes.ADD);
-    streak.setScale((titleW * 0.98) / streak.width);
-    this.tweens.add({
-      targets: streak, alpha: { from: 1, to: 0.55 },
-      duration: 1600, ease: 'Sine.easeInOut', yoyo: true, repeat: -1,
-    });
+    // On very short screens skip the tagline bar, light streak and text entirely so they don't crowd the buttons
+    if (!layout.mobile || height >= 400) {
+      const streak = this.add.image(titleX, title.y + title.displayHeight * 0.6 + 8 * titleGapMul, 'fx_light_h')
+        .setBlendMode(Phaser.BlendModes.ADD);
+      streak.setScale((titleW * 0.98) / streak.width);
+      this.tweens.add({
+        targets: streak, alpha: { from: 1, to: 0.55 },
+        duration: 1600, ease: 'Sine.easeInOut', yoyo: true, repeat: -1,
+      });
 
-    const bar  = this.add.image(titleX, 0, 'txt_tag_frame');
-    const barW = titleW * 0.8;
-    bar.setScale(barW / bar.width);
-    bar.y = streak.y + bar.displayHeight / 2 + 16;
-    this.add.text(titleX, bar.y, 'CHUYỂN MÌNH KHAI PHÁ, VỮNG BƯỚC TIÊN PHONG', {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   `${Math.max(11, Math.round(barW * 0.032))}px`,
-      fontStyle:  'bold',
-      color:      '#EAF8FF',
-    }).setOrigin(0.5, 0.5).setShadow(0, 2, '#001040', 4, false, true);
+      const bar  = this.add.image(titleX, 0, 'txt_tag_frame');
+      const barW = titleW * 0.8;
+      bar.setScale(barW / bar.width);
+      bar.y = streak.y + bar.displayHeight / 2 + 16 * titleGapMul;
+
+      this.add.text(titleX, bar.y, 'CHUYỂN MÌNH KHAI PHÁ, VỮNG BƯỚC TIÊN PHONG', {
+        fontFamily: 'Outfit, sans-serif',
+        fontSize:   `${Math.max(10, Math.round(barW * 0.032))}px`,
+        fontStyle:  'bold',
+        color:      '#EAF8FF',
+      }).setOrigin(0.5, 0.5).setShadow(0, 2, '#001040', 4, false, true);
+    }
 
     // ── Scenic vignettes (wide screens only) ──────────────────────────────
     if (!compact) {
@@ -122,20 +146,38 @@ export class MainMenuScene extends Phaser.Scene {
     }
 
     // ── Buttons — flush along the bottom edge of the screen ───────────────
-    const buttonY = height - 44;
+    // Desktop: same as before (height - 44). Mobile: pull up a bit more and
+    // use a shorter button height so buttons don't overflow.
     const btnW    = Math.min(220, width * 0.4);
+    const btnH    = layout.mobile ? Math.round(44 * layout.uiScale) : 52;
+    const btnFs   = layout.mobile ? Math.round(16 * layout.uiScale) : 20;
+    // Seat the buttons on the bottom safe line (clears the home indicator),
+    // scaling their inset with the button height. Desktop unchanged.
+    const buttonY = layout.mobile ? layout.safeBottom - btnH / 2 - 6 : height - 44;
 
     this.makeButton(width / 2 - btnW / 2 - 14, buttonY, btnW, 'CHƠI NGAY', true, () => {
       this.scene.start('LevelSelectScene');
-    });
+    }, btnH, btnFs);
 
-    this.soundButtonText = this.makeButton(
-      width / 2 + btnW / 2 + 14, buttonY, btnW,
-      this.getSoundButtonLabel(), false,
-      () => this.toggleSound(),
-    );
+    {
+      const cx = width / 2 + btnW / 2 + 14;
+      const btn = makeCrystalButton(this, cx, buttonY, btnW, this.getSoundButtonLabel(), () => this.toggleSound(), {
+        bh: btnH, primary: false, fontSize: btnFs,
+      });
+      this.soundButtonText = btn.text;
+      // Nudge the label right to make room for the icon at the button's left edge.
+      btn.text.setX(btn.text.x + this.soundIconRadius * 1.3);
+      this.soundIconContainer = btn.container;
+      this.soundIcon = drawSpeakerIcon(
+        this, -btnW / 2 + this.soundIconRadius * 1.8, 0,
+        this.soundIconRadius * 1.6, isMuted(this),
+      );
+      btn.container.addAt(this.soundIcon, 1);
+    }
 
     this.setupResizeHandler();
+    ensureBgMusic(this);
+    armMusicWatchdog(this);
   }
 
   /** The loaded slingshot on the left, aiming at the fortress: the NỎ art
@@ -399,53 +441,25 @@ export class MainMenuScene extends Phaser.Scene {
   }
 
   /**
-   * Glassmorphism button. Returns its label Text object (so the caller can
-   * update it, e.g. the sound toggle).
+   * Crystal button (Frame.png "NÚT CHÍNH / NÚT PHỤ" style, shared renderer).
+   * Returns its label Text object (so the caller can update it, e.g. the
+   * sound toggle).
    */
-  private makeButton(cx: number, cy: number, bw: number, label: string, primary: boolean, cb: () => void) {
-    const bh = 52;
-    const container = this.add.container(cx, cy);
-
-    const bg = this.add.graphics();
-    const draw = (hover: boolean) => {
-      bg.clear();
-      bg.fillStyle(hover ? COL.navyHi : COL.navyMid, hover ? 0.9 : 0.62);
-      bg.lineStyle(2, hover ? COL.cyanSoft : COL.cyan, hover ? 1 : 0.8);
-      bg.fillRoundedRect(-bw / 2, -bh / 2, bw, bh, 12);
-      bg.strokeRoundedRect(-bw / 2, -bh / 2, bw, bh, 12);
-      // top inner highlight — glass edge
-      bg.lineStyle(1, 0xFFFFFF, hover ? 0.35 : 0.18);
-      bg.lineBetween(-bw / 2 + 10, -bh / 2 + 3, bw / 2 - 10, -bh / 2 + 3);
-    };
-    draw(false);
-
-    const text = this.add.text(0, 0, label, {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   primary ? '20px' : '17px',
-      fontStyle:  'bold',
-      color:      '#A8F8F8',
-    }).setOrigin(0.5, 0.5);
-
-    container.add([bg, text]);
-
-    const zone = this.add.zone(cx, cy, bw, bh)
-      .setOrigin(0.5, 0.5)
-      .setInteractive({ useHandCursor: true });
-
-    zone.on('pointerover', () => {
-      draw(true);
-      this.tweens.add({ targets: container, scale: 1.05, duration: 110, ease: 'Power1' });
-    });
-    zone.on('pointerout', () => {
-      draw(false);
-      this.tweens.add({ targets: container, scale: 1.0, duration: 110, ease: 'Power1' });
-    });
-    zone.on('pointerdown', cb);
-
-    return text;
+  private makeButton(
+    cx: number, cy: number, bw: number, label: string, primary: boolean,
+    cb: () => void, bh = 52, fontSize?: number,
+  ) {
+    return makeCrystalButton(this, cx, cy, bw, label, cb, {
+      bh,
+      primary,
+      fontSize: fontSize ?? (primary ? 20 : 17),
+    }).text;
   }
 
   private createAtmosphere(width: number, height: number) {
+    // Purely decorative — skip on low-power devices where a continuous
+    // ADD-blended full-screen emitter is real frame-time cost (see perf.ts).
+    if (isLowPowerDevice) return;
     this.add.particles(0, 0, 'fx_crystal', {
       x: { min: 0, max: width },
       y: { min: 0, max: height },
@@ -460,14 +474,16 @@ export class MainMenuScene extends Phaser.Scene {
   }
 
   private toggleSound() {
-    this.soundEnabled = !this.soundEnabled;
-    localStorage.setItem('sound_enabled', this.soundEnabled ? 'true' : 'false');
+    const nowMuted = toggleMute(this);
     this.soundButtonText.setText(this.getSoundButtonLabel());
-    this.sound.mute = !this.soundEnabled;
+    const iconX = this.soundIcon.x;
+    this.soundIcon.destroy();
+    this.soundIcon = drawSpeakerIcon(this, iconX, 0, this.soundIconRadius * 1.6, nowMuted);
+    this.soundIconContainer.addAt(this.soundIcon, 1);
   }
 
   private getSoundButtonLabel(): string {
-    return this.soundEnabled ? '🔊 ÂM THANH: BẬT' : '🔇 ÂM THANH: TẮT';
+    return isMuted(this) ? 'ÂM THANH: TẮT' : 'ÂM THANH: BẬT';
   }
 
   /**
@@ -486,4 +502,5 @@ export class MainMenuScene extends Phaser.Scene {
       this.scale.off('resize', onResize);
     });
   }
+
 }

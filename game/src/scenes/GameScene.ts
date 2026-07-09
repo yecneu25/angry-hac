@@ -4,6 +4,10 @@ import { LEVELS, scaleLevel } from '../data/LevelData';
 import type { LevelDef, BlockDef, EnemyDef } from '../data/LevelData';
 import { attachSkyMotion } from '../fx/skyMotion';
 import { paintBlock, shade } from '../fx/blockPainter';
+import { drawCrystalPanel, makeCrystalButton, drawSpeakerIcon } from '../fx/crystalFrame';
+import { getLayout } from '../utils/responsive';
+import { ensureBgMusic, armMusicWatchdog, toggleMute, isMuted } from '../utils/music';
+import { isLowPowerDevice } from '../utils/perf';
 
 // ── Colour palette (from design-system.md) ─────────────────────────────────
 const C = {
@@ -100,8 +104,6 @@ export class GameScene extends Phaser.Scene {
   private bird!: Phaser.Physics.Matter.Sprite;
   private birdGlow!:   Phaser.GameObjects.Image;
   private birdTrail!:  Phaser.GameObjects.Particles.ParticleEmitter;
-  /** Directional wind-streak image trailing the bird while airborne. */
-  private birdStreak!: Phaser.GameObjects.Image;
   private isDragging = false;
   private isLaunched = false;
   /** Birds remaining to be shot (decrements on each launch). */
@@ -132,6 +134,13 @@ export class GameScene extends Phaser.Scene {
   private gfxSling!:  Phaser.GameObjects.Graphics;
   private gfxTraj!:   Phaser.GameObjects.Graphics;
   private gfxHpBars!: Phaser.GameObjects.Graphics;
+  /** Soft tapering ribbon drawn behind the bird in flight. */
+  private gfxTrail!:  Phaser.GameObjects.Graphics;
+  private trailPts: { x: number; y: number }[] = [];
+  /** Physics time-scale while a bird is airborne — <1 makes the flight play
+   *  out a touch slower/more gracefully without changing its path, range or
+   *  the bird's mass (Matter timeScale just stretches simulated time). */
+  private readonly FLIGHT_TIME_SCALE = 0.8;
 
   // ── Game objects ──────────────────────────────────────────────────────────
   private blocks:  BlockRuntime[]  = [];
@@ -144,7 +153,11 @@ export class GameScene extends Phaser.Scene {
 
   // ── State ─────────────────────────────────────────────────────────────────
   private resetTimer: Phaser.Time.TimerEvent | null = null;
+  private resizeTimer: Phaser.Time.TimerEvent | null = null;
   private gameEnded = false;
+  /** True while the mobile intro camera sweep (playIntroPan) is driving the
+   *  camera — blocks bird dragging so input doesn't fight the scripted pan. */
+  private introPanning = false;
 
   constructor() { super('GameScene'); }
 
@@ -158,9 +171,12 @@ export class GameScene extends Phaser.Scene {
     this.score      = 0;
     this.gameEnded  = false;
     this.resetTimer = null;
+    this.resizeTimer = null;
     this.slowFrames = 0;
     this.slingWobble = 0;
+    this.trailPts = [];
     this.birdQueueIcons = [];  // reset icon refs between restarts
+    this.introPanning = false;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -178,6 +194,7 @@ export class GameScene extends Phaser.Scene {
     // Extra bottom clearance so falling objects exit cleanly
     this.matter.world.setBounds(0, -500, this.worldWidth, height + 600);
 
+    const layout = getLayout(width, height);
     this.cameras.main.setZoom(this.CAMERA_ZOOM);
 
     // ── Slingshot position anchor coordinates ─────────────────────────────
@@ -186,13 +203,24 @@ export class GameScene extends Phaser.Scene {
     // rests clearly above the fork tips and the bright water-splash terrain
     // decoration behind it, instead of sitting right in the middle of both.
     this.anchorX = 280;
-    this.anchorY = height - 280;
+    // Mobile landscape: place the anchor proportionally in the lower part of
+    // the safe area so there's always drag headroom, no matter how short the
+    // viewport is (fixed height-190 jammed the sling into the HUD on very
+    // short screens). Desktop (height ≥ 500): keep the original height-280.
+    this.anchorY = layout.mobile
+      ? layout.safeBottom - Math.min(220, Math.max(104, height * 0.42))
+      : height - 280;
 
     // ── Background ────────────────────────────────────────────────────────
     const bgKeys = ['bg_cover3', 'bg_cover2', 'bg_cover1'];
     const bgKey  = bgKeys[(this.levelId - 1) % bgKeys.length];
+    // scrollFactor 1 (was 0.2): the background is pinned to the world so
+    // blocks, enemies AND the slingshot stay locked to it while the camera
+    // pans with the bird — the old parallax made every world object appear to
+    // drift out of its spot relative to the backdrop. Scaled to cover the
+    // full worldWidth so panning never runs off the art.
     const bg = this.add.image(this.worldWidth / 2, height / 2, bgKey)
-      .setScrollFactor(0.2)
+      .setScrollFactor(1)
       .setDepth(0);
     // Divided by zoom so the art still fully covers the viewport at any
     // camera zoom level.
@@ -202,16 +230,21 @@ export class GameScene extends Phaser.Scene {
     attachSkyMotion(this);
 
     // ── Atmosphere sparkles ───────────────────────────────────────────────
-    this.add.particles(0, 0, 'fx_crystal', {
-      x:         { min: 0,    max: this.worldWidth },
-      y:         { min: 0,    max: height * 0.75 },
-      speed:     { min: 4,    max: 18 },
-      scale:     { start: 0.02, end: 0.08 },
-      alpha:     { start: 0.15, end: 0.7 },
-      lifespan:  5000,
-      frequency: 180,
-      blendMode: 'ADD',
-    }).setScrollFactor(0.25).setDepth(1);
+    // Purely decorative — skip on low-power devices where a continuous
+    // ADD-blended full-worldWidth emitter is real frame-time cost, on top
+    // of the physics load a level already carries (see perf.ts).
+    if (!isLowPowerDevice) {
+      this.add.particles(0, 0, 'fx_crystal', {
+        x:         { min: 0,    max: this.worldWidth },
+        y:         { min: 0,    max: height * 0.75 },
+        speed:     { min: 4,    max: 18 },
+        scale:     { start: 0.02, end: 0.08 },
+        alpha:     { start: 0.15, end: 0.7 },
+        lifespan:  5000,
+        frequency: 180,
+        blendMode: 'ADD',
+      }).setScrollFactor(0.25).setDepth(1);
+    }
 
     // ── Terrain (ground + decoration) ─────────────────────────────────────
     this.createTerrain(height);
@@ -259,26 +292,19 @@ export class GameScene extends Phaser.Scene {
     });
     this.birdTrail = this.add.particles(0, 0, 'fx_crystal', {
       speed:     { min: 5,  max: 25 },
-      scale:     { start: 0.05, end: 0.005 },
-      alpha:     { start: 0.7,  end: 0 },
+      scale:     { start: 0.04, end: 0.004 },
+      alpha:     { start: 0.5,  end: 0 },
       lifespan:  400,
-      frequency: 30,
+      frequency: 40,
       blendMode: 'ADD',
       tint:      C.cyanSoft,
     }).setDepth(22);
     this.birdTrail.stop();
 
-    // Directional wind-streak — oriented to velocity each frame in update(),
-    // origin biased toward the tail so it trails behind rather than centering
-    // on the bird.
-    this.birdStreak = this.add.image(0, 0, 'fx_smoke')
-      .setBlendMode(Phaser.BlendModes.ADD)
-      .setTint(C.cyanSoft)
-      .setOrigin(0.8, 0.5)
-      .setScale(0.09 * ELEMENT_SCALE)
-      .setAlpha(0.5)
-      .setDepth(22.5)
-      .setVisible(false);
+    // Soft tapering ribbon behind the bird (replaces the hard smoke streak).
+    // NORMAL blend (not ADD) so the light stroke stays visible over the bright
+    // aurora sky as well as dark terrain.
+    this.gfxTrail = this.add.graphics().setDepth(22.5);
 
     // ── Level structures & enemies ────────────────────────────────────────
     this.buildLevel(height);
@@ -290,7 +316,17 @@ export class GameScene extends Phaser.Scene {
     this.createHUD(width, height);
 
     // ── Spawn first bird ─────────────────────────────────────────────────
-    this.spawnBird();
+    // On mobile landscape the intro pan (below) drives the camera itself for
+    // its first couple of seconds, so it must own startFollow, not spawnBird.
+    this.spawnBird(layout.mobile);
+
+    // DEV-ONLY: ?end=win|lose shows the end panel immediately for inspection.
+    if (import.meta.env.DEV) {
+      const end = new URLSearchParams(location.search).get('end');
+      if (end === 'win' || end === 'lose') {
+        this.time.delayedCall(200, () => this.showEndPanel(end === 'win'));
+      }
+    }
 
     // ── Input ─────────────────────────────────────────────────────────────
     this.setupInput();
@@ -298,8 +334,77 @@ export class GameScene extends Phaser.Scene {
     // ── Collision ─────────────────────────────────────────────────────────
     this.matter.world.on('collisionstart', this.onCollision, this);
 
-    // ── Initial camera position: centre on slingshot ─────────────────────
-    this.cameras.main.centerOn(this.anchorX + 300, this.anchorY);
+    // ── Initial camera position ────────────────────────────────────────────
+    if (layout.mobile) {
+      // Desktop's wide viewport already shows both the sling AND the first
+      // target structure at once (camera bounds clamp scrollX to 0, and at
+      // zoom 1 that alone reveals ~1600-1920 world-units — plenty). A phone's
+      // much narrower viewport only reveals ~width world-units from that same
+      // clamped position, which cut the first tower off-screen entirely
+      // (reported: sling visible, target nowhere in frame). Rather than
+      // zooming the camera out — which would also shrink/distort the HUD,
+      // since Phaser applies camera zoom to scrollFactor(0) objects too —
+      // sweep the camera over to show the target once, then hand back to the
+      // sling before the player can act.
+      this.cameras.main.centerOn(this.anchorX, this.anchorY);
+      this.playIntroPan();
+    } else {
+      this.cameras.main.centerOn(this.anchorX + 300, this.anchorY);
+    }
+
+    this.setupResizeHandler();
+  }
+
+  /** Rebuild the level layout when the viewport changes shape — e.g. the
+   *  player rotates the phone mid-level, or resizes the browser on desktop.
+   *  Restarting re-runs create() against the new width/height (and the design
+   *  canvas itself, on touch devices — see setupOrientationResize in game.ts)
+   *  so the sling/terrain/HUD stay glued to the current orientation instead of
+   *  freezing at whatever shape the level was loaded in. Same pattern as
+   *  MainMenuScene/LevelSelectScene; the listener MUST be removed on shutdown
+   *  or a leaked handler restarts this scene while another one is running.
+   */
+  private setupResizeHandler() {
+    const onResize = () => {
+      if (!this.scene.isActive()) return;
+      this.resizeTimer?.remove();
+      this.resizeTimer = this.time.delayedCall(150, () => this.scene.restart({ level: this.levelId }));
+    };
+    this.scale.on('resize', onResize);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.scale.off('resize', onResize);
+    });
+  }
+
+  /** Mobile-only: briefly pans the camera right to preview the first
+   *  structure cluster, then pans back to the slingshot and hands off to the
+   *  normal bird-follow. Dragging is blocked (introPanning) so a tap during
+   *  the sweep can't start a shot while the camera is elsewhere. */
+  private playIntroPan() {
+    this.introPanning = true;
+    const cam = this.cameras.main;
+
+    const xs = [...this.levelDef.blocks.map(b => b.x), ...this.levelDef.enemies.map(e => e.x)];
+    const firstX = xs.length ? Math.min(...xs) : this.anchorX + cam.width;
+    // Centre the preview a bit past the nearest structure so it isn't hugging
+    // the left edge of frame, clamped so we don't try to look past the level.
+    const previewX = Phaser.Math.Clamp(
+      firstX + cam.width * 0.18, this.anchorX, this.worldWidth - cam.width / 2,
+    );
+
+    this.time.delayedCall(450, () => {
+      if (!this.scene.isActive()) return;
+      cam.pan(previewX, this.anchorY, 700, 'Sine.easeInOut');
+      this.time.delayedCall(700 + 700, () => {
+        if (!this.scene.isActive()) return;
+        cam.pan(this.anchorX, this.anchorY, 700, 'Sine.easeInOut', false, (_cam, progress) => {
+          if (progress === 1) {
+            this.introPanning = false;
+            if (this.bird?.active) cam.startFollow(this.bird, true, 0.04, 0.04);
+          }
+        });
+      });
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -339,22 +444,20 @@ export class GameScene extends Phaser.Scene {
       this.birdTrail.setPosition(this.bird.x, this.bird.y);
       if (this.isLaunched && !this.isDragging) {
         this.birdTrail.start();
-        const body = this.bird.body as MatterJS.BodyType;
-        const spd  = Math.hypot(body.velocity.x, body.velocity.y);
-        const streakScaleX = Phaser.Math.Clamp(spd / 20, 0.5, 1.6) * 0.09;
-        this.birdStreak
-          .setPosition(this.bird.x, this.bird.y)
-          .setRotation(this.bird.rotation)
-          .setScale(streakScaleX, 0.07)
-          .setVisible(spd > 1);
+        // Record the flight path and redraw the smooth ribbon each frame.
+        this.trailPts.push({ x: this.bird.x, y: this.bird.y });
+        if (this.trailPts.length > 20) this.trailPts.shift();
+        this.drawTrailRibbon();
       } else {
         this.birdTrail.stop();
-        this.birdStreak.setVisible(false);
+        this.trailPts.length = 0;
+        this.gfxTrail.clear();
       }
     } else {
       this.birdGlow.setVisible(false);
       this.birdTrail.stop();
-      this.birdStreak.setVisible(false);
+      this.trailPts.length = 0;
+      this.gfxTrail.clear();
     }
 
     // 4. Redraw HP bars in world space (they scroll with camera)
@@ -506,7 +609,19 @@ export class GameScene extends Phaser.Scene {
   //  SLINGSHOT & BIRD
   // ══════════════════════════════════════════════════════════════════════════
 
-  private spawnBird() {
+  /** Matter engine time-scale — 1 is real time, <1 is slow motion. Used to
+   *  ease the bird's flight into a slightly slower, more graceful arc. */
+  private setPhysicsTimeScale(s: number) {
+    const eng = (this.matter.world as any).engine;
+    if (eng?.timing) eng.timing.timeScale = s;
+  }
+
+  /** skipFollow: used by the mobile intro pan (playIntroPan) — it drives the
+   *  camera itself for a couple of seconds before handing off to the normal
+   *  bird-follow, so spawnBird must not immediately re-seize control. */
+  private spawnBird(skipFollow = false) {
+    // Normal time while aiming / settling; slow-mo is applied only at launch.
+    this.setPhysicsTimeScale(1);
     if (this.birdsLeft <= 0) {
       this.scheduleEndGame(false);
       return;
@@ -531,13 +646,13 @@ export class GameScene extends Phaser.Scene {
     this.launchVY   = 0;
     if (this.resetTimer) { this.resetTimer.destroy(); this.resetTimer = null; }
 
-    this.cameras.main.startFollow(this.bird, true, 0.04, 0.04);
+    if (!skipFollow) this.cameras.main.startFollow(this.bird, true, 0.04, 0.04);
     this.refreshHUD();
   }
 
   private setupInput() {
     this.input.on('pointerdown', (ptr: Phaser.Input.Pointer) => {
-      if (this.isLaunched || this.gameEnded || !this.bird?.active) return;
+      if (this.introPanning || this.isLaunched || this.gameEnded || !this.bird?.active) return;
       const d = Phaser.Math.Distance.Between(ptr.worldX, ptr.worldY, this.bird.x, this.bird.y);
       if (d < 65 * ELEMENT_SCALE) {
         this.isDragging = true;
@@ -598,6 +713,10 @@ export class GameScene extends Phaser.Scene {
       this.bird.setStatic(false);
       this.bird.setAwake();
       this.bird.setVelocity(this.launchVX, this.launchVY);
+
+      // Ease into slow motion for a more graceful flight — path, range and
+      // mass are unchanged, only simulated time is stretched.
+      this.setPhysicsTimeScale(this.FLIGHT_TIME_SCALE);
 
       // Camera follows the bird in flight
       this.cameras.main.startFollow(this.bird, true, 0.1, 0.1);
@@ -720,6 +839,33 @@ export class GameScene extends Phaser.Scene {
       const a  = Math.max(0.05, 0.9 - i * 0.014);
       this.gfxTraj.fillStyle(C.cyanSoft, a);
       this.gfxTraj.fillCircle(px, py, r);
+    }
+  }
+
+  /** Soft, tapering wake behind the bird — built from its recent positions.
+   *  Three ADD-blended passes (wide dim glow → mid → bright core) with the
+   *  width and alpha fading toward the tail give a smooth ribbon rather than a
+   *  hard streak; a small dot at each sample rounds the joints. */
+  private drawTrailRibbon() {
+    this.gfxTrail.clear();
+    const pts = this.trailPts;
+    const n = pts.length;
+    if (n < 2) return;
+
+    const passes: Array<[number, number, number]> = [
+      [18 * ELEMENT_SCALE,  C.cyan,     0.22],
+      [10 * ELEMENT_SCALE,  C.cyanSoft, 0.38],
+      [4.5 * ELEMENT_SCALE, C.white,    0.65],
+    ];
+    for (const [width, color, alpha] of passes) {
+      for (let i = 1; i < n; i++) {
+        const t = i / (n - 1);            // 0 at tail → 1 at the bird
+        const w = width * (0.15 + 0.85 * t);
+        this.gfxTrail.lineStyle(w, color, alpha * t * t);
+        this.gfxTrail.lineBetween(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
+        this.gfxTrail.fillStyle(color, alpha * t * t);
+        this.gfxTrail.fillCircle(pts[i].x, pts[i].y, w / 2);
+      }
     }
   }
 
@@ -927,10 +1073,10 @@ export class GameScene extends Phaser.Scene {
       tint:      [C.tnt, C.gold, 0xFFF6D8],
       emitting:  false,
     }).setDepth(64);
-    burst.explode(36, x, y);
+    burst.explode(isLowPowerDevice ? 16 : 36, x, y);
     this.time.delayedCall(700, () => burst.destroy());
 
-    this.spawnImpactSmoke(x, y, C.tnt, 5);
+    this.spawnImpactSmoke(x, y, C.tnt, isLowPowerDevice ? 2 : 5);
     this.cameras.main.shake(300, 0.024);
   }
 
@@ -962,7 +1108,7 @@ export class GameScene extends Phaser.Scene {
       blendMode: 'ADD',
       emitting: false,
     }).setDepth(60);
-    burst.explode(25, ex, ey);
+    burst.explode(isLowPowerDevice ? 12 : 25, ex, ey);
     this.time.delayedCall(1000, () => burst.destroy());
 
     const color = rec.type === 'armored' ? C.enemyArmor : C.enemy;
@@ -1013,7 +1159,12 @@ export class GameScene extends Phaser.Scene {
   /** Angular crystal-shard debris (was plain rectangles) + a brief sparkle burst. */
   private spawnDebris(x: number, y: number, color: number) {
     const edgeColor = shade(color, 40);
-    for (let i = 0; i < 8; i++) {
+    // A cascading tower collapse can call this many times in the same frame
+    // (one per destroyed block) — each chip is its own tweened Graphics
+    // object, so on low-power devices trim the per-hit count rather than
+    // skipping the effect outright (see perf.ts).
+    const chipCount = isLowPowerDevice ? 4 : 8;
+    for (let i = 0; i < chipCount; i++) {
       const chip = this.add.graphics().setDepth(12);
       const r     = Phaser.Math.Between(5, 12);
       const sides = Phaser.Math.Between(3, 5);
@@ -1060,9 +1211,15 @@ export class GameScene extends Phaser.Scene {
   //  SCORE
   // ══════════════════════════════════════════════════════════════════════════
 
+  private updateScoreUI() {
+    if (!this.txtScore) return;
+    const { mobile } = getLayout(this.cameras.main.width, this.cameras.main.height);
+    this.txtScore.setText(mobile ? `ĐIỂM: ${this.score}` : `${this.score}`);
+  }
+
   private addScore(pts: number) {
     this.score += pts;
-    if (this.txtScore) this.txtScore.setText(`${this.score}`);
+    this.updateScoreUI();
 
     // Floating "+points" text near score impact
     const wx = this.bird?.active ? this.bird.x : this.cameras.main.scrollX + this.cameras.main.width / 2;
@@ -1092,10 +1249,10 @@ export class GameScene extends Phaser.Scene {
     const aliveCount = this.enemies.filter(e => !e.dead).length;
     if (this.enemies.length > 0 && aliveCount === 0) {
       // All enemies dead → WIN!
-      // Add bonus for remaining birds (including the one currently in slingshot)
-      const birdsBonus = (this.birdsLeft + (this.isLaunched ? 0 : 1)) * 500;
+      // Add bonus for remaining birds (unused birds in the queue + on the slingshot)
+      const birdsBonus = this.birdsLeft * 1000;
       this.score += birdsBonus;
-      if (this.txtScore) this.txtScore.setText(`${this.score}`);
+      this.updateScoreUI();
       this.scheduleEndGame(true);
     }
   }
@@ -1103,6 +1260,7 @@ export class GameScene extends Phaser.Scene {
   private scheduleEndGame(wonHint: boolean) {
     if (this.gameEnded) return;
     this.gameEnded = true;
+    this.setPhysicsTimeScale(1); // let the final settle play out at real time
     // Re-evaluate at fire time: the last shot may still be toppling blocks
     // onto the remaining enemies while the panel delay runs.
     this.time.delayedCall(wonHint ? 1600 : 1400, () => {
@@ -1118,60 +1276,95 @@ export class GameScene extends Phaser.Scene {
 
     // All UI is in SCREEN-SPACE (setScrollFactor(0)) so it doesn't move with camera
     // Overlay
+    // Dim the gameplay scene hard so the dark crystal frame reads as the
+    // single focal point (its interior is near-black, so a strong dark wash
+    // around it makes the blue frame line pop and hides the art's block edge).
     const overlay = this.add.graphics().setDepth(200).setScrollFactor(0);
-    overlay.fillStyle(0x000018, 0.78);
+    overlay.fillStyle(0x000008, 0.9);
     overlay.fillRect(0, 0, width, height);
     fadeIn.push(overlay);
 
-    // Panel — centred on screen
-    const panelW = Math.min(420, width - 40);
-    const panelH = 320;
-    const px     = (width  - panelW) / 2;
-    const py     = (height - panelH) / 2;
+    // Panel — the shared Frame.png crystal dialog. Sizing differs by device:
+    //  • Desktop: centred and raised a touch so the two action buttons seat
+    //    just below the frame (reference art), height tracks content.
+    //  • Mobile landscape: the panel + its button row must BOTH fit between the
+    //    HUD (safeTop) and the bottom safe line — a fixed 340 px panel + a
+    //    button row 46 px under it overflowed short screens and shoved the
+    //    title into the HUD. So we reserve the button strip, fit the panel in
+    //    what's left, hug it to safeTop, and scale the title/body down.
+    const layout  = getLayout(width, height);
+    const uiScale = layout.uiScale;
+    const midX    = width / 2;
 
-    const panel = this.add.graphics().setDepth(201).setScrollFactor(0);
-    fadeIn.push(panel);
-    panel.fillStyle(C.navy, 0.97);
-    panel.lineStyle(3, won ? C.cyan : C.pink, 1);
-    panel.fillRoundedRect(px, py, panelW, panelH, 18);
-    panel.strokeRoundedRect(px, py, panelW, panelH, 18);
+    // Button metrics (shared by the panel-size math and the button row below).
+    const btnH  = layout.mobile ? Math.round(46 * uiScale) : 50;
+    const btnFs = layout.mobile ? Math.round(17 * uiScale) : 17;
+    const btnGap = layout.mobile ? Math.round(20 * uiScale) : 26;
+    const buttonReserve = btnH + Math.round(20 * uiScale);
 
-    // Glow border
-    panel.lineStyle(6, won ? C.cyan : C.pink, 0.15);
-    panel.strokeRoundedRect(px - 3, py - 3, panelW + 6, panelH + 6, 21);
+    let panelW: number, panelH: number, panelCY: number, titleSize: number;
+    if (layout.mobile) {
+      const availH = layout.safeBottom - layout.safeTop;
+      panelH    = Math.min(won ? 300 : 200, Math.max(140, availH - buttonReserve));
+      panelW    = Math.min(460, width - 24 - layout.safeLeft - layout.safeRight);
+      panelCY   = layout.safeTop + panelH / 2;
+      titleSize = Math.round(30 * uiScale);
+    } else {
+      panelW    = Math.min(480, width - 40);
+      panelH    = Math.min(won ? 340 : 248, height - 70);
+      panelCY   = height / 2 - (won ? 34 : 16);
+      titleSize = 34;
+    }
+    const btnW = layout.mobile ? Math.min(190, (panelW - btnGap) / 2) : 190;
 
-    const midX = px + panelW / 2;
+    const panel = drawCrystalPanel(
+      this, width / 2, panelCY, panelW, panelH, {
+        title:      won ? 'THẮNG RỒI!' : 'THẤT BẠI',
+        subtitle:   `Ải ${this.levelId} – ${this.levelDef.name}`,
+        titleColor: won ? '#EAF8FF' : '#FF8FA0',
+        titleGlow:  won ? '#48D0F8' : '#FF8FA0',
+        titleSize,
+        depth:      201,
+        screenSpace: true,
+        fillAlpha:  0.8,
+        onClose:    () => this.scene.start('LevelSelectScene'),
+      });
+    fadeIn.push(...panel.objects);
 
-    // Title
-    const titleStr = won ? '✨ THẮNG RỒI! ✨' : '💀 THẤT BẠI';
-    fadeIn.push(this.add.text(midX, py + 52, titleStr, {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   won ? '36px' : '32px',
-      fontStyle:  'bold',
-      color:      won ? '#A8F8F8' : '#FF8FA0',
-    }).setOrigin(0.5, 0.5).setDepth(202).setScrollFactor(0)
-      .setShadow(0, 0, won ? '#48D0F8' : '#FF8FA0', 18, true, true));
+    const py   = panel.contentTop;
+    // Centre the body in the space between the header and the frame's inner
+    // bottom edge so nothing floats with an empty gap beneath it.
+    const innerBottom = panel.rect.y + panel.rect.h - 34;
+    const areaH = innerBottom - py;
 
-    // Stars — each pops in with a scale-bounce, staggered after the panel
-    // fade so they read as a little celebratory sequence rather than a
-    // static string appearing all at once.
+    let scoreY: number;
     if (won) {
       const [t1, t2, t3] = this.levelDef.starScore;
       const stars  = this.score >= t3 ? 3 : this.score >= t2 ? 2 : this.score >= t1 ? 1 : 0;
-      const starY  = py + 120;
-      const spacing = 54;
+
+      // Centre the [star row + score] block within the content area, then pop
+      // each star in with a staggered scale-bounce. Uses the same gold/empty
+      // star art as the level-select map so the two screens read as one set.
+      // All metrics scale down on mobile so the row fits the shorter panel.
+      const sc = layout.mobile ? uiScale : 1;
+      const starH = 50 * sc, gap = 30 * sc, scoreH = 26 * sc;
+      const startY = py + Math.max(6, (areaH - (starH + gap + scoreH)) / 2);
+      const starY  = startY + starH / 2;
+      scoreY       = startY + starH + gap + scoreH / 2;
+
+      const starSrc = this.textures.get('map_star_full').getSourceImage() as HTMLImageElement;
+      const starBase = (50 * sc) / starSrc.width; // display ~50px (scaled) from the 66px source glyph
+      const spacing = 60 * sc;
       for (let i = 0; i < 3; i++) {
         const filled = i < stars;
         const sx = midX + (i - 1) * spacing;
-        const starTxt = this.add.text(sx, starY, filled ? '★' : '☆', {
-          fontFamily: 'Outfit, sans-serif',
-          fontSize:   '44px',
-          color:      filled ? '#FFD87A' : '#3A5A78',
-        }).setOrigin(0.5, 0.5).setDepth(202).setScrollFactor(0).setScale(0);
+        const star = this.add.image(sx, starY, filled ? 'map_star_full' : 'map_star_empty')
+          .setDepth(202).setScrollFactor(0).setScale(0);
+        if (!filled) star.setAlpha(0.85);
 
         const delay = 300 + i * 180;
         this.tweens.add({
-          targets: starTxt, scale: filled ? [0, 1.35, 1] : 1,
+          targets: star, scale: filled ? [0, starBase * 1.35, starBase] : starBase,
           duration: filled ? 420 : 200, delay, ease: 'Back.easeOut',
         });
         if (filled) {
@@ -1187,24 +1380,41 @@ export class GameScene extends Phaser.Scene {
         }
       }
       this.saveProgress(stars);
+    } else {
+      scoreY = py + areaH / 2;
     }
 
     // Score
-    fadeIn.push(this.add.text(midX, py + 178, `Điểm: ${this.score}`, {
+    if (won) {
+      const birdsBonus = this.birdsLeft * 1000;
+      if (birdsBonus > 0) {
+        fadeIn.push(this.add.text(midX, scoreY - 24 * uiScale, `Thưởng Hạc dư: +${birdsBonus}`, {
+          fontFamily: 'Outfit, sans-serif',
+          fontSize:   `${layout.mobile ? Math.round(15 * uiScale) : 15}px`,
+          color:      '#FFD87A',
+        }).setOrigin(0.5, 0.5).setDepth(202).setScrollFactor(0));
+      }
+    }
+
+    fadeIn.push(this.add.text(midX, scoreY, `Điểm: ${this.score}`, {
       fontFamily: 'Outfit, sans-serif',
-      fontSize:   '22px',
+      fontSize:   `${layout.mobile ? Math.round(24 * uiScale) : 24}px`,
       color:      '#A8F8F8',
     }).setOrigin(0.5, 0.5).setDepth(202).setScrollFactor(0));
 
-    // Buttons (positions in screen-space)
-    const btnY  = py + 258;
-    const btnW  = 155;
-    const gap   = 20;
-    const totalW = btnW * 2 + gap;
+    // Buttons — seated just below the frame's bottom edge, like the
+    // NÚT CHÍNH / NÚT PHỤ pair in the reference art. On mobile they sit in the
+    // reserved strip between the panel and the bottom safe line.
+    const btnY = layout.mobile
+      ? Math.min(panel.rect.y + panel.rect.h + buttonReserve / 2, layout.safeBottom - btnH / 2)
+      : Math.min(panel.rect.y + panel.rect.h + 46, height - 34);
+    const totalW = btnW * 2 + btnGap;
     const startX = (width - totalW) / 2 + btnW / 2;
 
-    this.makeScreenButton(startX,      btnY, 'CHƠI LẠI', btnW, () => this.scene.restart({ level: this.levelId }));
-    this.makeScreenButton(startX + btnW + gap, btnY, 'BẢN ĐỒ',  btnW, () => this.scene.start('LevelSelectScene'));
+    this.makeScreenButton(startX, btnY, 'CHƠI LẠI', btnW, true, fadeIn,
+      () => this.scene.restart({ level: this.levelId }), btnH, btnFs);
+    this.makeScreenButton(startX + btnW + btnGap, btnY, 'BẢN ĐỒ', btnW, false, fadeIn,
+      () => this.scene.start('LevelSelectScene'), btnH, btnFs);
 
     // Fade the panel in so it doesn't pop harshly over the action
     fadeIn.forEach(obj => (obj as unknown as { alpha: number }).alpha = 0);
@@ -1214,39 +1424,17 @@ export class GameScene extends Phaser.Scene {
     if (won) this.spawnConfetti(width, height);
   }
 
-  /** Creates a button entirely in screen-space (scrollFactor 0). */
-  private makeScreenButton(cx: number, cy: number, label: string, bw: number, cb: () => void) {
-    const bh = 46;
-    const depthBase = 202;
-
-    // Graphics for button background — in screen space
-    const bg = this.add.graphics().setDepth(depthBase).setScrollFactor(0);
-    const drawBg = (hover: boolean) => {
-      bg.clear();
-      bg.fillStyle(hover ? 0x0050C0 : C.navyMid, hover ? 1 : 0.88);
-      bg.lineStyle(2, hover ? C.cyanSoft : C.cyan, 1);
-      bg.fillRoundedRect(cx - bw / 2, cy - bh / 2, bw, bh, 10);
-      bg.strokeRoundedRect(cx - bw / 2, cy - bh / 2, bw, bh, 10);
-    };
-    drawBg(false);
-
-    this.add.text(cx, cy, label, {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   '17px',
-      fontStyle:  'bold',
-      color:      '#A8F8F8',
-    }).setOrigin(0.5, 0.5).setDepth(depthBase + 1).setScrollFactor(0);
-
-    // Interactive zone — screen space, so world x/y = screen x/y when scrollFactor=0
-    const zone = this.add.zone(cx, cy, bw, bh)
-      .setOrigin(0.5, 0.5)
-      .setScrollFactor(0)
-      .setDepth(depthBase + 5)
-      .setInteractive({ useHandCursor: true });
-
-    zone.on('pointerover',  () => drawBg(true));
-    zone.on('pointerout',   () => drawBg(false));
-    zone.on('pointerdown',  cb);
+  /** Creates a crystal button in screen-space (scrollFactor 0); its visuals
+   *  are appended to `fadeIn` so it fades in with the rest of the panel. */
+  private makeScreenButton(
+    cx: number, cy: number, label: string, bw: number,
+    primary: boolean, fadeIn: Phaser.GameObjects.GameObject[], cb: () => void,
+    bh = 50, fontSize = 17,
+  ) {
+    const btn = makeCrystalButton(this, cx, cy, bw, label, cb, {
+      depth: 202, screenSpace: true, primary, fontSize, bh,
+    });
+    fadeIn.push(btn.container);
   }
 
   private spawnConfetti(screenW: number, screenH: number) {
@@ -1294,6 +1482,7 @@ export class GameScene extends Phaser.Scene {
 
   private scheduleReset() {
     if (this.resetTimer || this.gameEnded) return;
+    this.setPhysicsTimeScale(1); // flight is over — back to real time
     this.resetTimer = this.time.delayedCall(1400, () => this.doReset());
   }
 
@@ -1314,40 +1503,57 @@ export class GameScene extends Phaser.Scene {
 
   private createHUD(width: number, height: number) {
     // Top bar — screen space
+    const layout = getLayout(width, height);
+    const { hudH, uiScale, safeLeft: sl, safeRight: sr } = layout;
     const hudBg = this.add.graphics().setDepth(100).setScrollFactor(0);
     hudBg.fillStyle(C.navy, 0.82);
-    hudBg.fillRect(0, 0, width, 64);
+    hudBg.fillRect(0, 0, width, hudH);
     hudBg.lineStyle(1, C.cyan, 0.35);
-    hudBg.lineBetween(0, 64, width, 64);
+    hudBg.lineBetween(0, hudH, width, hudH);
 
-    // Level name — centre
-    this.add.text(width / 2, 32, `ẢI ${this.levelId} – ${this.levelDef.name}`, {
+    const midY = hudH / 2;
+    // Left/right paddings pull in from the notch on mobile (0 on desktop).
+    const padL = 18 + sl;
+    const padR = 18 + sr;
+
+    // Level name — centre. Scaled down on mobile so a long name never spills
+    // over the ĐIỂM / HẠC blocks on either side.
+    this.add.text(width / 2, midY, `ẢI ${this.levelId} – ${this.levelDef.name}`, {
       fontFamily: 'Outfit, sans-serif',
-      fontSize:   '19px',
+      fontSize:   `${layout.mobile ? Math.round(18 * uiScale) : 19}px`,
       fontStyle:  'bold',
       color:      '#A8F8F8',
     }).setOrigin(0.5, 0.5).setDepth(101).setScrollFactor(0)
       .setShadow(0, 0, '#48D0F8', 8, true, true);
 
     // Score label + value — right
-    this.add.text(width - 18, 12, 'ĐIỂM', {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   '10px',
-      color:      '#48D0F8',
-    }).setOrigin(1, 0).setDepth(101).setScrollFactor(0);
+    if (layout.mobile) {
+      this.txtScore = this.add.text(width - padR, midY, `ĐIỂM: ${this.score}`, {
+        fontFamily: 'Outfit, sans-serif',
+        fontSize:   `${Math.round(15 * uiScale)}px`,
+        fontStyle:  'bold',
+        color:      '#FFD87A',
+      }).setOrigin(1, 0.5).setDepth(101).setScrollFactor(0);
+    } else {
+      this.add.text(width - padR, midY - hudH * 0.25, 'ĐIỂM', {
+        fontFamily: 'Outfit, sans-serif',
+        fontSize:   '10px',
+        color:      '#48D0F8',
+      }).setOrigin(1, 0).setDepth(101).setScrollFactor(0);
 
-    this.txtScore = this.add.text(width - 18, 32, '0', {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   '24px',
-      fontStyle:  'bold',
-      color:      '#FFD87A',
-    }).setOrigin(1, 0.5).setDepth(101).setScrollFactor(0);
+      this.txtScore = this.add.text(width - padR, midY, '0', {
+        fontFamily: 'Outfit, sans-serif',
+        fontSize:   '24px',
+        fontStyle:  'bold',
+        color:      '#FFD87A',
+      }).setOrigin(1, 0.5).setDepth(101).setScrollFactor(0);
+    }
 
     // Exit button — far left, before the bird counter (keeps the right side
     // free for the score block so nothing collides at narrow widths)
-    const exitBtn = this.add.text(18, 32, '✕', {
+    const exitBtn = this.add.text(padL, midY, '✕', {
       fontFamily: 'Outfit, sans-serif',
-      fontSize:   '22px',
+      fontSize:   `${layout.mobile ? Math.round(18 * uiScale) : 22}px`,
       fontStyle:  'bold',
       color:      '#FF8FA0',
     }).setOrigin(0, 0.5).setDepth(101).setScrollFactor(0)
@@ -1355,44 +1561,111 @@ export class GameScene extends Phaser.Scene {
       .setInteractive({ useHandCursor: true });
 
     // Bird count — left, after the exit button
-    this.add.text(64, 12, 'HẠC', {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   '10px',
-      color:      '#48D0F8',
-    }).setOrigin(0, 0).setDepth(101).setScrollFactor(0);
+    if (layout.mobile) {
+      this.txtBirds = this.add.text(padL + 36 * uiScale, midY, `HẠC: ${this.birdsLeft}`, {
+        fontFamily: 'Outfit, sans-serif',
+        fontSize:   `${Math.round(15 * uiScale)}px`,
+        fontStyle:  'bold',
+        color:      '#A8F8F8',
+      }).setOrigin(0, 0.5).setDepth(101).setScrollFactor(0);
+    } else {
+      this.add.text(padL + 46, midY - hudH * 0.25, 'HẠC', {
+        fontFamily: 'Outfit, sans-serif',
+        fontSize:   '10px',
+        color:      '#48D0F8',
+      }).setOrigin(0, 0).setDepth(101).setScrollFactor(0);
 
-    this.txtBirds = this.add.text(64, 32, '', {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   '22px',
-      fontStyle:  'bold',
-      color:      '#A8F8F8',
-    }).setOrigin(0, 0.5).setDepth(101).setScrollFactor(0);
+      this.txtBirds = this.add.text(padL + 46, midY, '', {
+        fontFamily: 'Outfit, sans-serif',
+        fontSize:   '22px',
+        fontStyle:  'bold',
+        color:      '#A8F8F8',
+      }).setOrigin(0, 0.5).setDepth(101).setScrollFactor(0);
+    }
 
     exitBtn.on('pointerover',  () => exitBtn.setColor('#FFFFFF'));
     exitBtn.on('pointerout',   () => exitBtn.setColor('#FF8FA0'));
     exitBtn.on('pointerdown',  () => this.scene.start('LevelSelectScene'));
 
+    this.createSoundButton(width);
+    ensureBgMusic(this);
+    armMusicWatchdog(this);
+
     // Bottom: bird queue visual indicator
     this.createBirdQueueUI(width, height);
   }
+
+  private createSoundButton(width: number) {
+    const layout = getLayout(width, this.cameras.main.height);
+    // Sits left of the score block; pulls in from a right-side notch on mobile.
+    const btnX = width - (layout.mobile ? 118 + layout.safeRight : 150);
+    const btnY = layout.hudH / 2;
+    const radius = layout.mobile ? Math.round(15 * layout.uiScale) : 18;
+
+    const container = this.add.container(btnX, btnY).setDepth(101).setScrollFactor(0);
+
+    const bg = this.add.graphics();
+
+    const drawBg = (hover: boolean) => {
+      bg.clear();
+      bg.fillStyle(hover ? 0x0040B0 : 0x002070, 0.85);
+      bg.fillCircle(0, 0, radius);
+      bg.lineStyle(2, C.cyan, 1);
+      bg.strokeCircle(0, 0, radius);
+    };
+
+    drawBg(false);
+
+    let icon = drawSpeakerIcon(this, 0, 0, radius * 1.1, isMuted(this));
+    container.add([bg, icon]);
+
+    const zone = this.add.zone(0, 0, radius * 2, radius * 2)
+      .setOrigin(0.5, 0.5)
+      .setInteractive({ useHandCursor: true });
+    container.add(zone);
+
+    zone.on('pointerover', () => {
+      drawBg(true);
+      this.tweens.add({ targets: container, scale: 1.1, duration: 100 });
+    });
+
+    zone.on('pointerout', () => {
+      drawBg(false);
+      this.tweens.add({ targets: container, scale: 1.0, duration: 100 });
+    });
+
+    zone.on('pointerdown', () => {
+      const nowMuted = toggleMute(this);
+      icon.destroy();
+      icon = drawSpeakerIcon(this, 0, 0, radius * 1.1, nowMuted);
+      container.addAt(icon, 1);
+    });
+  }
+
 
   private birdQueueIcons: Phaser.GameObjects.Image[] = [];
 
   private createBirdQueueUI(width: number, height: number) {
     this.birdQueueIcons = [];
+    const layout = getLayout(width, height);
+    const { mobile, uiScale } = layout;
     const total   = this.levelDef.birds.length;
-    const iconSize = 32;
-    const gap      = 6;
+    const iconSize = mobile ? Math.round(32 * uiScale) : 32;
+    const gap      = mobile ? Math.max(3, Math.round(6 * uiScale)) : 6;
     const totalW   = total * (iconSize + gap) - gap;
     const startX   = width / 2 - totalW / 2;
-    const y        = height - 28;
+    // Pill height scales too, then the queue is seated just above the bottom
+    // safe area (clears the iOS home indicator on mobile; height-28 desktop).
+    const pH = mobile ? Math.round(44 * uiScale) : 44;
+    const y  = mobile ? layout.safeBottom - pH / 2 : height - 28;
 
     // Background pill
     const pillBg = this.add.graphics().setDepth(100).setScrollFactor(0);
     pillBg.fillStyle(C.navy, 0.7);
-    pillBg.fillRoundedRect(startX - 10, y - 22, totalW + 20, 44, 22);
+    const pR = pH / 2;
+    pillBg.fillRoundedRect(startX - pR, y - pR, totalW + pH, pH, pR);
     pillBg.lineStyle(1, C.cyan, 0.3);
-    pillBg.strokeRoundedRect(startX - 10, y - 22, totalW + 20, 44, 22);
+    pillBg.strokeRoundedRect(startX - pR, y - pR, totalW + pH, pH, pR);
 
     for (let i = 0; i < total; i++) {
       const icon = this.add.image(startX + i * (iconSize + gap) + iconSize / 2, y, 'logo')
@@ -1403,7 +1676,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private refreshHUD() {
-    if (this.txtBirds) this.txtBirds.setText(`×${this.birdsLeft}`);
+    if (this.txtBirds) {
+      const { mobile } = getLayout(this.cameras.main.width, this.cameras.main.height);
+      this.txtBirds.setText(mobile ? `HẠC: ${this.birdsLeft}` : `×${this.birdsLeft}`);
+    }
 
     // Update queue icons: used birds dim out
     const used = this.levelDef.birds.length - this.birdsLeft;

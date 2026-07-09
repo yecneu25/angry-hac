@@ -1,6 +1,10 @@
 import Phaser from 'phaser';
 import { LEVELS } from '../data/LevelData';
 import { attachSkyMotion } from '../fx/skyMotion';
+import { makeCrystalButton, drawSpeakerIcon } from '../fx/crystalFrame';
+import { getLayout, type LayoutMode } from '../utils/responsive';
+import { ensureBgMusic, armMusicWatchdog, toggleMute, isMuted } from '../utils/music';
+import { isLowPowerDevice } from '../utils/perf';
 
 interface GameProgress {
   unlocked: boolean[];
@@ -46,131 +50,190 @@ export class LevelSelectScene extends Phaser.Scene {
 
     this.createAtmosphere(width, height);
 
-    // ── Title ──────────────────────────────────────────────────────────────
-    this.add.text(width / 2, height * 0.13, 'CHỌN CỬA ẢI', {
+    const layout = getLayout(width, height);
+    // On mobile the usable band runs from just under the HUD-less safe top to
+    // the bottom safe line; we lay title → node row → buttons out inside it so
+    // nothing clusters at the top with dead space in the middle.
+    const topY    = layout.mobile ? layout.safeTop : 0;
+    const bottomY = layout.mobile ? layout.safeBottom : height;
+    const availH  = bottomY - topY;
+
+    // ── Title (no frame here — the map floats straight over the scenery) ──
+    const titleFontSize = Math.round(Math.min(
+      layout.mobile ? 32 : 44,
+      width * (layout.mobile ? 0.042 : 0.05),
+    ));
+    const titleY = layout.mobile ? topY + availH * 0.10 : height * 0.13;
+    this.add.text(width / 2, titleY, 'CHỌN CỬA ẢI', {
       fontFamily: 'Outfit, sans-serif',
-      fontSize:   `${Math.round(Math.min(44, width * 0.05))}px`,
+      fontSize:   `${titleFontSize}px`,
       fontStyle:  'bold',
       color:      '#A8F8F8',
     }).setOrigin(0.5, 0.5).setShadow(0, 0, '#48D0F8', 16, true, true);
 
-    // ── Level nodes ────────────────────────────────────────────────────────
+    // ── Bottom buttons ──────────────────────────────────────────────────
+    const btnH   = layout.mobile ? Math.round(46 * layout.uiScale) : 46;
+    const btnY   = layout.mobile ? bottomY - btnH / 2 - 4 : height * 0.9;
+    // Desktop: hard offset ±115px. Mobile: scale with width so buttons stay
+    // centred and don't collide on narrower screens.
+    const btnOffset = layout.mobile ? width * 0.14 : 115;
+    const btnW      = layout.mobile ? Math.min(180, width * 0.26) : 200;
+
+    // ── Level nodes ──────────────────────────────────────────────────
+    // Evenly-spaced single row. On mobile the row is centred in the gap
+    // between the title and the button row (biased up a little to leave room
+    // for the star + label that hang below each orb), and node x is mapped
+    // into the notch-safe width. Desktop keeps its original coordinates.
+    const usableW = width - layout.safeLeft - layout.safeRight;
+    const nodeY = layout.mobile
+      ? Phaser.Math.Linear(titleY, btnY - btnH / 2, 0.44)
+      : height * 0.42;
     const nodes = LEVELS.map((lvl, i) => ({
-      x: width * (0.25 + 0.25 * i),
-      y: height * (i === 1 ? 0.42 : 0.47),
+      x: layout.mobile
+        ? layout.safeLeft + usableW * (0.25 + 0.25 * i)
+        : width * (0.25 + 0.25 * i),
+      y: nodeY,
       level: lvl.id,
       name: lvl.name,
     }));
 
     this.drawPath(nodes);
-    nodes.forEach((node, index) => this.createNode(node, index));
+    nodes.forEach((node, index) => this.createNode(node, index, layout));
 
-    // ── Bottom buttons ─────────────────────────────────────────────────────
-    const btnY = height * 0.9;
-    this.makeButton(width / 2 - 110, btnY, 190, 'QUAY LẠI', COL.cyan, '#A8F8F8', () => {
+    this.makeButton(width / 2 - btnOffset, btnY, btnW, 'QUAY LẠI', true, () => {
       this.scene.start('MainMenuScene');
     });
-    this.makeButton(width / 2 + 110, btnY, 190, 'THIẾT LẬP LẠI', COL.pink, '#FF8FA0', () => {
+    this.makeButton(width / 2 + btnOffset, btnY, btnW, 'THIẾT LẬP LẠI', false, () => {
       this.resetProgress();
     });
 
+    this.createSoundButton(width);
+
     this.setupResizeHandler();
+    ensureBgMusic(this);
+    armMusicWatchdog(this);
   }
 
-  private createNode(node: { x: number; y: number; level: number; name: string }, index: number) {
+  /** Corner sound button for quick toggling */
+  private createSoundButton(width: number) {
+    const layout = getLayout(width, this.cameras.main.height);
+    const radius = layout.mobile ? Math.round(18 * layout.uiScale) : 20;
+    const btnX = width - (radius + 20) - layout.safeRight;
+    const btnY = (radius + 20 * layout.uiScale);
+
+    const container = this.add.container(btnX, btnY).setDepth(100);
+
+    const bg = this.add.graphics();
+
+    const drawBg = (hover: boolean) => {
+      bg.clear();
+      bg.fillStyle(hover ? 0x0040B0 : 0x002070, 0.85);
+      bg.fillCircle(0, 0, radius);
+      bg.lineStyle(2, 0x48D0F8, 1);
+      bg.strokeCircle(0, 0, radius);
+    };
+
+    drawBg(false);
+
+    let icon = drawSpeakerIcon(this, 0, 0, radius * 1.1, isMuted(this));
+    container.add([bg, icon]);
+
+    const zone = this.add.zone(0, 0, radius * 2, radius * 2)
+      .setOrigin(0.5, 0.5)
+      .setInteractive({ useHandCursor: true });
+    container.add(zone);
+
+    zone.on('pointerover', () => {
+      drawBg(true);
+      this.tweens.add({ targets: container, scale: 1.1, duration: 100 });
+    });
+
+    zone.on('pointerout', () => {
+      drawBg(false);
+      this.tweens.add({ targets: container, scale: 1.0, duration: 100 });
+    });
+
+    zone.on('pointerdown', () => {
+      const nowMuted = toggleMute(this);
+      icon.destroy();
+      icon = drawSpeakerIcon(this, 0, 0, radius * 1.1, nowMuted);
+      container.addAt(icon, 1);
+    });
+  }
+
+
+  /** Renders one level node straight from the MapLevel.png-sliced art: the
+   *  crystal orb (glow + diamonds + icy number baked in), the gold/empty star
+   *  glyphs filled to the earned count, and the two-line crystal-font label. */
+  private createNode(
+    node: { x: number; y: number; level: number; name: string },
+    index: number,
+    layout: LayoutMode,
+  ) {
+    const isMobile = layout.mobile;
     const isUnlocked  = !!this.progress.unlocked[index];
     const starsEarned = Phaser.Math.Clamp(this.progress.stars[index] ?? 0, 0, 3);
+    const width = this.cameras.main.width;
 
     const container = this.add.container(node.x, node.y);
 
-    // Halo behind unlocked nodes
-    if (isUnlocked) {
-      const halo = this.add.graphics();
-      halo.fillStyle(COL.cyan, 0.14);
-      halo.fillCircle(0, 0, 62);
-      container.add(halo);
+    // ── Crystal orb (the user's art — number + diamonds + glow are baked in) ─
+    // Scale the orb continuously to the available vertical band so the whole
+    // orb+star+label cluster always fits, from small phones up to tablets.
+    const ORB_W = isMobile
+      ? Math.min(120, Math.round((layout.safeBottom - layout.safeTop) * 0.30))
+      : 138;
+    const orb = this.add.image(0, 0, `map_orb${node.level}`);
+    orb.setDisplaySize(ORB_W, ORB_W * orb.height / orb.width);
+    const orbH = orb.displayHeight;
+    if (!isUnlocked) orb.setTint(0x33465e).setAlpha(0.72);
+    container.add(orb);
+
+    const orbScale  = ORB_W / 138;            // 1.0 desktop, <1 mobile
+    if (!isUnlocked) {
+      container.add(this.add.text(0, 0, '🔒', { fontSize: `${Math.round(38 * orbScale)}px` })
+        .setOrigin(0.5, 0.5).setAlpha(0.9));
     }
 
-    const nodeBg = this.add.graphics();
-    if (isUnlocked) {
-      nodeBg.fillStyle(0x0030D8, 0.75);
-      nodeBg.lineStyle(3, COL.cyan, 1);
-    } else {
-      nodeBg.fillStyle(0x000020, 0.8);
-      nodeBg.lineStyle(3, COL.locked, 0.8);
+    // ── Star row — the user's gold/outline star glyphs ────────────────────────────
+    const STAR_W    = Math.round(30 * orbScale);
+    const starGap   = Math.round(34 * orbScale);
+    const starRowY  = orbH / 2 + Math.round(18 * orbScale);
+    for (let i = 0; i < 3; i++) {
+      const key = (isUnlocked && i < starsEarned) ? 'map_star_full' : 'map_star_empty';
+      const st = this.add.image((i - 1) * starGap, starRowY, key)
+        .setDisplaySize(STAR_W, STAR_W);
+      if (!isUnlocked) st.setAlpha(0.45);
+      container.add(st);
     }
-    nodeBg.fillCircle(0, 0, 45);
-    nodeBg.strokeCircle(0, 0, 45);
-    container.add(nodeBg);
+
+    // ── Label ("Cửa N:" + name) — crystal font baked in the reference ───────
+    const label = this.add.image(0, 0, `map_label${node.level}`);
+    const LABEL_W = Math.min(width * 0.3, Math.round(236 * orbScale));
+    label.setDisplaySize(LABEL_W, LABEL_W * label.height / label.width);
+    label.setY(starRowY + Math.round(18 * orbScale) + label.displayHeight / 2);
+    if (!isUnlocked) label.setAlpha(0.5);
+    container.add(label);
 
     if (isUnlocked) {
-      container.add(this.add.text(0, 0, `${node.level}`, {
-        fontFamily: 'Outfit, sans-serif',
-        fontSize:   '32px',
-        fontStyle:  'bold',
-        color:      '#A8F8F8',
-      }).setOrigin(0.5, 0.5));
-
-      const starString = '★'.repeat(starsEarned) + '☆'.repeat(3 - starsEarned);
-      container.add(this.add.text(0, 65, starString, {
-        fontFamily: 'Outfit, sans-serif',
-        fontSize:   '20px',
-        color:      '#FFD87A',
-      }).setOrigin(0.5, 0.5));
-
       this.tweens.add({
         targets: container, y: node.y - 8,
         duration: 1500 + index * 200,
         ease: 'Sine.easeInOut', yoyo: true, repeat: -1,
       });
-    } else {
-      container.add(this.add.text(0, 0, '🔒', { fontSize: '24px' })
-        .setOrigin(0.5, 0.5).setAlpha(0.6));
-    }
 
-    container.add(this.add.text(0, 98, `Cửa ${node.level}:\n${node.name}`, {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   '14px',
-      color:      isUnlocked ? '#A8F8F8' : '#3A5A78',
-      align:      'center',
-      lineSpacing: 4,
-    }).setOrigin(0.5, 0.5));
-
-    if (isUnlocked) {
-      const zone = this.add.zone(node.x, node.y, 110, 110)
+      const zone = this.add.zone(node.x, node.y, ORB_W * 0.82, orbH * 0.82)
         .setOrigin(0.5, 0.5)
         .setInteractive({ useHandCursor: true });
-      zone.on('pointerover', () => this.tweens.add({ targets: container, scale: 1.1, duration: 100 }));
-      zone.on('pointerout',  () => this.tweens.add({ targets: container, scale: 1.0, duration: 100 }));
+      zone.on('pointerover', () => this.tweens.add({ targets: container, scale: 1.08, duration: 120 }));
+      zone.on('pointerout',  () => this.tweens.add({ targets: container, scale: 1.0, duration: 120 }));
       zone.on('pointerdown', () => this.scene.start('GameScene', { level: node.level }));
     }
   }
 
-  private makeButton(cx: number, cy: number, bw: number, label: string, accent: number, textColor: string, cb: () => void) {
-    const bh = 44;
-    const bg = this.add.graphics();
-    const draw = (hover: boolean) => {
-      bg.clear();
-      bg.fillStyle(hover ? COL.navyMid : COL.navy, hover ? 0.85 : 0.62);
-      bg.lineStyle(hover ? 2 : 1.5, accent, hover ? 1 : 0.65);
-      bg.fillRoundedRect(cx - bw / 2, cy - bh / 2, bw, bh, 8);
-      bg.strokeRoundedRect(cx - bw / 2, cy - bh / 2, bw, bh, 8);
-    };
-    draw(false);
-
-    this.add.text(cx, cy, label, {
-      fontFamily: 'Outfit, sans-serif',
-      fontSize:   '16px',
-      fontStyle:  'bold',
-      color:      textColor,
-    }).setOrigin(0.5, 0.5);
-
-    const zone = this.add.zone(cx, cy, bw, bh)
-      .setOrigin(0.5, 0.5)
-      .setInteractive({ useHandCursor: true });
-    zone.on('pointerover', () => draw(true));
-    zone.on('pointerout',  () => draw(false));
-    zone.on('pointerdown', cb);
+  /** Crystal button — shared Frame.png renderer (NÚT CHÍNH / NÚT PHỤ). */
+  private makeButton(cx: number, cy: number, bw: number, label: string, primary: boolean, cb: () => void) {
+    makeCrystalButton(this, cx, cy, bw, label, cb, { bh: 46, primary, fontSize: 16 });
   }
 
   private drawPath(nodes: { x: number; y: number }[]) {
@@ -193,6 +256,9 @@ export class LevelSelectScene extends Phaser.Scene {
   }
 
   private createAtmosphere(width: number, height: number) {
+    // Purely decorative — skip on low-power devices where a continuous
+    // ADD-blended full-screen emitter is real frame-time cost (see perf.ts).
+    if (isLowPowerDevice) return;
     this.add.particles(0, 0, 'fx_crystal', {
       x: { min: 0, max: width },
       y: { min: 0, max: height },

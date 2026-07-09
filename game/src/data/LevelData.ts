@@ -104,7 +104,7 @@ export const LEVELS: LevelDef[] = [
     id: 1,
     name: 'Bản Lĩnh Pha Lê',
     worldWidth: 2400,
-    starScore: [1500, 3500, 5500],
+    starScore: [1500, 3000, 4200],
     birds: [
       { type: 'hac' },
       { type: 'hac' },
@@ -120,7 +120,6 @@ export const LEVELS: LevelDef[] = [
       { type: 'wood',  x: 940, y: 20, w: 20,  h: 80 },
       // Roof (y=100..120)
       { type: 'stone', x: 900, y: 100, w: 100, h: 20 },
-
       // ── Tower B (x=1650) — taller than Tower A (wall h=80→140, roof/enemy
       // shifted up by the same +60) so the level reads as a small→tall
       // progression like Angry Birds' staged skylines, instead of two
@@ -150,7 +149,7 @@ export const LEVELS: LevelDef[] = [
     id: 2,
     name: 'Thung Lũng Cực Quang',
     worldWidth: 2800,
-    starScore: [4000, 8000, 13000],
+    starScore: [4000, 8000, 11500],
     birds: [
       { type: 'hac' },
       { type: 'hac' },
@@ -164,7 +163,6 @@ export const LEVELS: LevelDef[] = [
       // GameScene), so a shot that's slightly short of clearing the wall
       // still pays off instead of just bouncing harmlessly off the ground. ──
       { type: 'tnt',   x: 770,  y: 0,   w: 44,  h: 44 },
-
       // ── Tower A (x=880) — now 2 tiers (was 1) so the level reads as more
       // built-up: the enemy moved from y=140 (on the original roof, which
       // is now a load-bearing mid-slab carrying tier-2's walls) up to the
@@ -200,7 +198,6 @@ export const LEVELS: LevelDef[] = [
       { type: 'wood',  x: 825, y: 140, w: 20,  h: 70 },
       { type: 'wood',  x: 935, y: 140, w: 20,  h: 70 },
       { type: 'ice',   x: 880, y: 210, w: 150, h: 20 }, // top roof — enemy stands here only
-
       // ── Mid cluster 1 (x=1150) — a TNT crate and a guard sharing one
       // pedestal but NOT overlapping each other at spawn (11px clear gap),
       // so neither is displaced by the other on the first physics step.
@@ -208,7 +205,6 @@ export const LEVELS: LevelDef[] = [
       // 52px-diameter enemy with margin on every edge. ──
       { type: 'wood',  x: 1150, y: 0,  w: 120, h: 20 },
       { type: 'tnt',   x: 1120, y: 20, w: 46,  h: 46 },
-
       // ── Midfield debris pile (x=1400) — unchanged, proven stable.
       // Pedestal must be at least as wide as the enemy resting on it (52px
       // diameter) — a 20px-wide pedestal is a knife-edge balance: the enemy
@@ -216,7 +212,6 @@ export const LEVELS: LevelDef[] = [
       // a couple of seconds, bleeding score with no shot fired.
       { type: 'wood',  x: 1400, y: 0,  w: 60, h: 20 },
       { type: 'wood',  x: 1400, y: 20, w: 56, h: 40 },
-
       // ── Mid cluster 2 (x=1700) — a short sentry pillar plus a standalone
       // TNT crate at its base (80px clear of the pedestal, within the
       // 150px blast radius so popping it can topple the pillar). ──
@@ -224,7 +219,6 @@ export const LEVELS: LevelDef[] = [
       { type: 'stone', x: 1700, y: 0,   w: 70, h: 20 },
       { type: 'stone', x: 1700, y: 20,  w: 40, h: 90 },
       { type: 'ice',   x: 1700, y: 110, w: 70, h: 20 },
-
       // ── Tower B (x=2000) — unchanged tall tower (was the level's
       // finale); now flanked by a TNT crate on its left (130px from centre,
       // inside blast radius) and an extra armored guard on a separate
@@ -260,7 +254,7 @@ export const LEVELS: LevelDef[] = [
     id: 3,
     name: 'Đỉnh Núi Băng Giá',
     worldWidth: 3400,
-    starScore: [6000, 12000, 18000],
+    starScore: [6000, 12000, 15000],
     birds: [
       { type: 'hac' },
       { type: 'hac' },
